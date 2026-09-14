@@ -1,4 +1,5 @@
 import json
+import os
 import urllib.request
 
 SYMBOL = "XBTUSDT"
@@ -6,6 +7,11 @@ INTERVAL = 15
 
 SHORT_EMA = 9
 LONG_EMA = 21
+
+START_BALANCE = 1000.0
+TRADE_AMOUNT = 100.0
+
+STATE_FILE = "paper_state.json"
 
 
 def get_candles():
@@ -26,18 +32,13 @@ def get_candles():
         raise RuntimeError(data["error"])
 
     result = data["result"]
+    pair_key = [key for key in result if key != "last"][0]
 
-    pair_key = [key for key in result.keys() if key != "last"][0]
-
-    # Closing prices
-    prices = [float(candle[4]) for candle in result[pair_key]]
-
-    return prices[-100:]
+    return [float(candle[4]) for candle in result[pair_key]][-100:]
 
 
 def calculate_ema(prices, period):
     multiplier = 2 / (period + 1)
-
     ema = prices[0]
 
     for price in prices[1:]:
@@ -46,18 +47,23 @@ def calculate_ema(prices, period):
     return ema
 
 
-def check_signal(prices):
-    short_ema = calculate_ema(prices, SHORT_EMA)
-    long_ema = calculate_ema(prices, LONG_EMA)
+def load_state():
+    if not os.path.exists(STATE_FILE):
+        return {
+            "balance": START_BALANCE,
+            "btc": 0.0,
+            "entry_price": 0.0,
+            "total_pnl": 0.0,
+            "trades": 0
+        }
 
-    if short_ema > long_ema:
-        signal = "BUY"
-    elif short_ema < long_ema:
-        signal = "SELL"
-    else:
-        signal = "HOLD"
+    with open(STATE_FILE, "r") as f:
+        return json.load(f)
 
-    return short_ema, long_ema, signal
+
+def save_state(state):
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
 
 
 def paper_trade():
@@ -65,24 +71,69 @@ def paper_trade():
 
     price = prices[-1]
 
-    short_ema, long_ema, signal = check_signal(prices)
+    ema9 = calculate_ema(prices, SHORT_EMA)
+    ema21 = calculate_ema(prices, LONG_EMA)
+
+    if ema9 > ema21:
+        signal = "BUY"
+    elif ema9 < ema21:
+        signal = "SELL"
+    else:
+        signal = "HOLD"
+
+    state = load_state()
+
+    # BUY: open a paper position
+    if signal == "BUY" and state["btc"] == 0:
+        state["btc"] = TRADE_AMOUNT / price
+        state["balance"] -= TRADE_AMOUNT
+        state["entry_price"] = price
+        state["trades"] += 1
+        action = "PAPER BUY"
+
+    # SELL: close paper position
+    elif signal == "SELL" and state["btc"] > 0:
+        sell_value = state["btc"] * price
+        pnl = sell_value - TRADE_AMOUNT
+
+        state["balance"] += sell_value
+        state["total_pnl"] += pnl
+        state["btc"] = 0.0
+        state["entry_price"] = 0.0
+        state["trades"] += 1
+        action = f"PAPER SELL | P/L: ${pnl:.2f}"
+
+    else:
+        action = "NO TRADE"
+
+    save_state(state)
+
+    unrealized = 0.0
+
+    if state["btc"] > 0:
+        unrealized = (state["btc"] * price) - TRADE_AMOUNT
+
+    total_value = state["balance"] + (state["btc"] * price)
 
     print("\n==============================")
     print("BTCUSDT PAPER TRADING BOT")
     print("==============================")
     print(f"BTC Price: ${price:,.2f}")
-    print(f"EMA {SHORT_EMA}: ${short_ema:,.2f}")
-    print(f"EMA {LONG_EMA}: ${long_ema:,.2f}")
-    print(f"Signal: {signal}")
-    print("Mode: PAPER TRADING")
+    print(f"EMA 9:     ${ema9:,.2f}")
+    print(f"EMA 21:    ${ema21:,.2f}")
+    print(f"Signal:    {signal}")
+    print(f"Action:    {action}")
+    print("------------------------------")
+    print(f"Balance:   ${state['balance']:,.2f}")
+    print(f"BTC Held:  {state['btc']:.8f}")
+    print(f"Total P/L: ${state['total_pnl']:,.2f}")
+    print(f"Open P/L:  ${unrealized:,.2f}")
+    print(f"Value:     ${total_value:,.2f}")
+    print(f"Trades:    {state['trades']}")
+    print("------------------------------")
+    print("MODE: PAPER TRADING")
     print("REAL MONEY: DISABLED")
     print("==============================")
 
 
-try:
-    paper_trade()
-
-except Exception as e:
-    print("\nBOT ERROR:")
-    print(str(e))
-    raise
+paper_trade()
