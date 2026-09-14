@@ -5,6 +5,9 @@ on:
   schedule:
     - cron: "*/15 * * * *"
 
+permissions:
+  contents: write
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
@@ -20,4 +23,18 @@ jobs:
           python-version: "3.11"
 
       - name: Run bot
-        run: python bot.py
+        run: python -u bot.py
+
+      - name: Save paper trading state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add paper_state.json
+
+          if git diff --cached --quiet; then
+            echo "No state changes to save."
+          else
+            git commit -m "Update paper trading state"
+            git push
+          fi
