@@ -20,8 +20,8 @@ MONTHS = [
 ]
 
 
-def get_historical_prices():
-    prices = []
+def get_historical_candles():
+    candles = []
 
     for year, month in MONTHS:
         month_text = f"{month:02d}"
@@ -54,16 +54,18 @@ def get_historical_prices():
                     if not row:
                         continue
 
-                    # Binance kline format:
-                    # 0=open time, 1=open, 2=high, 3=low, 4=close
                     try:
+                        open_price = float(row[1])
                         close_price = float(row[4])
                     except (ValueError, IndexError):
                         continue
 
-                    prices.append(close_price)
+                    candles.append({
+                        "open": open_price,
+                        "close": close_price
+                    })
 
-    return prices
+    return candles
 
 
 def calculate_ema(prices, period):
@@ -76,7 +78,9 @@ def calculate_ema(prices, period):
     return ema
 
 
-def backtest(prices):
+def backtest(candles):
+    closes = [candle["close"] for candle in candles]
+
     balance = START_BALANCE
     btc = 0.0
 
@@ -91,38 +95,45 @@ def backtest(prices):
     previous_ema9 = None
     previous_ema21 = None
 
-    for i in range(LONG_EMA, len(prices)):
-        history = prices[:i + 1]
+    for i in range(LONG_EMA, len(candles) - 1):
+        history = closes[:i + 1]
 
         ema9 = calculate_ema(history, SHORT_EMA)
         ema21 = calculate_ema(history, LONG_EMA)
 
-        price = prices[i]
+        # Signal is known only after candle i closes.
+        # Trade executes at the NEXT candle's open.
+        execution_price = candles[i + 1]["open"]
 
         if previous_ema9 is not None and previous_ema21 is not None:
 
-            # BUY: EMA 9 crosses above EMA 21
-            if (
+            crossed_up = (
                 previous_ema9 <= previous_ema21
                 and ema9 > ema21
+            )
+
+            crossed_down = (
+                previous_ema9 >= previous_ema21
+                and ema9 < ema21
+            )
+
+            # BUY at next candle OPEN
+            if (
+                crossed_up
                 and btc == 0
                 and balance >= TRADE_AMOUNT
             ):
                 fee = TRADE_AMOUNT * FEE_RATE
                 amount_after_fee = TRADE_AMOUNT - fee
 
-                btc = amount_after_fee / price
+                btc = amount_after_fee / execution_price
                 balance -= TRADE_AMOUNT
 
                 trades += 1
 
-            # SELL: EMA 9 crosses below EMA 21
-            elif (
-                previous_ema9 >= previous_ema21
-                and ema9 < ema21
-                and btc > 0
-            ):
-                sell_value = btc * price
+            # SELL at next candle OPEN
+            elif crossed_down and btc > 0:
+                sell_value = btc * execution_price
                 fee = sell_value * FEE_RATE
                 net_sell_value = sell_value - fee
 
@@ -139,7 +150,7 @@ def backtest(prices):
                 else:
                     losing_trades += 1
 
-        current_value = balance + (btc * price)
+        current_value = balance + (btc * execution_price)
 
         if current_value > max_balance:
             max_balance = current_value
@@ -152,9 +163,9 @@ def backtest(prices):
         previous_ema9 = ema9
         previous_ema21 = ema21
 
-    # Close open position at final price
+    # Close any remaining position at the final candle close.
     if btc > 0:
-        final_price = prices[-1]
+        final_price = candles[-1]["close"]
 
         sell_value = btc * final_price
         fee = sell_value * FEE_RATE
@@ -185,33 +196,32 @@ def backtest(prices):
         win_rate = 0.0
 
     return {
+        "candles": len(candles),
         "final_value": final_value,
         "total_pnl": total_pnl,
         "trades": trades,
         "winning_trades": winning_trades,
         "losing_trades": losing_trades,
         "win_rate": win_rate,
-        "max_drawdown": max_drawdown,
-        "candles": len(prices),
+        "max_drawdown": max_drawdown
     }
 
 
 def main():
     print("========================================")
-    print("BTCUSDT EMA 9/21 - 6 MONTH BACKTEST")
+    print("BTCUSDT EMA 9/21")
+    print("REALISTIC 6 MONTH BACKTEST")
     print("========================================")
 
-    prices = get_historical_prices()
+    candles = get_historical_candles()
 
-    if len(prices) < LONG_EMA + 10:
+    if len(candles) < LONG_EMA + 10:
         raise RuntimeError("Not enough historical data.")
 
-    print("----------------------------------------")
-    print(f"Total candles: {len(prices)}")
-    print("----------------------------------------")
+    result = backtest(candles)
 
-    result = backtest(prices)
-
+    print("----------------------------------------")
+    print(f"Candles tested:   {result['candles']}")
     print(f"Starting Balance: ${START_BALANCE:,.2f}")
     print(f"Final Value:      ${result['final_value']:,.2f}")
     print(f"Total P/L:        ${result['total_pnl']:,.2f}")
@@ -221,6 +231,7 @@ def main():
     print(f"Win Rate:         {result['win_rate']:.2f}%")
     print(f"Max Drawdown:     ${result['max_drawdown']:,.2f}")
     print("----------------------------------------")
+    print("EXECUTION: NEXT CANDLE OPEN")
     print("MODE: HISTORICAL BACKTEST")
     print("REAL MONEY: DISABLED")
     print("========================================")
