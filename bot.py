@@ -22,355 +22,140 @@ MONTHS = [
     (2026, 8),
 ]
 
-STRATEGIES = [
-    ("EMA 9/21", 9, 21),
-    ("EMA 12/26", 12, 26),
-    ("EMA 20/50", 20, 50),
-    ("EMA 20/100", 20, 100),
-    ("EMA 50/200", 50, 200),
-]
-
 
 def get_historical_candles():
     candles = []
 
     for year, month in MONTHS:
-        month_text = f"{month:02d}"
+        ym = f"{year}-{month:02d}"
 
         url = (
             "https://data.binance.vision/data/spot/monthly/"
             f"klines/BTCUSDT/15m/"
-            f"BTCUSDT-15m-{year}-{month_text}.zip"
+            f"BTCUSDT-15m-{ym}.zip"
         )
 
-        print(f"Downloading {year}-{month_text}...")
+        print(f"Downloading {ym}...")
 
         request = urllib.request.Request(
             url,
-            headers={
-                "User-Agent": "BTC-Multi-Strategy-Backtest/1.0"
-            }
+            headers={"User-Agent": "BTC-Strategy-Backtest/1.0"},
         )
 
         with urllib.request.urlopen(request, timeout=60) as response:
-            zip_data = response.read()
+            data = response.read()
 
-        with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
-            csv_name = z.namelist()[0]
-
-            with z.open(csv_name) as file:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            with z.open(z.namelist()[0]) as file:
                 reader = csv.reader(
-                    io.TextIOWrapper(
-                        file,
-                        encoding="utf-8"
-                    )
+                    io.TextIOWrapper(file, encoding="utf-8")
                 )
 
                 for row in reader:
-                    if not row:
+                    if len(row) < 6:
                         continue
 
                     try:
-                        open_price = float(row[1])
-                        close_price = float(row[4])
-                    except (ValueError, IndexError):
+                        candles.append({
+                            "open": float(row[1]),
+                            "high": float(row[2]),
+                            "low": float(row[3]),
+                            "close": float(row[4]),
+                        })
+                    except ValueError:
                         continue
-
-                    candles.append({
-                        "open": open_price,
-                        "close": close_price
-                    })
 
     return candles
 
 
-def calculate_ema_series(prices, period):
+def ema_series(values, period):
+    result = [None] * len(values)
+
+    if len(values) < period:
+        return result
+
+    ema = sum(values[:period]) / period
+    result[period - 1] = ema
+
     multiplier = 2 / (period + 1)
 
-    ema_values = [None] * len(prices)
-
-    if len(prices) < period:
-        return ema_values
-
-    ema = sum(prices[:period]) / period
-    ema_values[period - 1] = ema
-
-    for i in range(period, len(prices)):
+    for i in range(period, len(values)):
         ema = (
-            (prices[i] - ema) * multiplier
+            (values[i] - ema) * multiplier
         ) + ema
 
-        ema_values[i] = ema
+        result[i] = ema
 
-    return ema_values
+    return result
 
 
-def run_strategy(candles, short_period, long_period):
-    closes = [
-        candle["close"]
-        for candle in candles
-    ]
+def rsi_series(closes, period=14):
+    result = [None] * len(closes)
 
-    ema_short = calculate_ema_series(
-        closes,
-        short_period
-    )
+    if len(closes) <= period:
+        return result
 
-    ema_long = calculate_ema_series(
-        closes,
-        long_period
-    )
+    gains = []
+    losses = []
 
-    balance = START_BALANCE
-    btc = 0.0
+    for i in range(1, period + 1):
+        change = closes[i] - closes[i - 1]
+        gains.append(max(change, 0.0))
+        losses.append(max(-change, 0.0))
 
-    trades = 0
-    wins = 0
-    losses = 0
-    total_pnl = 0.0
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
 
-    peak_value = START_BALANCE
-    max_drawdown = 0.0
-
-    for i in range(long_period, len(candles) - 1):
-
-        if (
-            ema_short[i - 1] is None
-            or ema_long[i - 1] is None
-            or ema_short[i] is None
-            or ema_long[i] is None
-        ):
-            continue
-
-        crossed_up = (
-            ema_short[i - 1] <= ema_long[i - 1]
-            and ema_short[i] > ema_long[i]
-        )
-
-        crossed_down = (
-            ema_short[i - 1] >= ema_long[i - 1]
-            and ema_short[i] < ema_long[i]
-        )
-
-        execution_price = candles[i + 1]["open"]
-
-        # BUY at next candle OPEN
-        if (
-            crossed_up
-            and btc == 0
-            and balance >= TRADE_AMOUNT
-        ):
-            fee = TRADE_AMOUNT * FEE_RATE
-            amount_after_fee = TRADE_AMOUNT - fee
-
-            btc = (
-                amount_after_fee
-                / execution_price
-            )
-
-            balance -= TRADE_AMOUNT
-            trades += 1
-
-        # SELL at next candle OPEN
-        elif crossed_down and btc > 0:
-
-            sell_value = btc * execution_price
-            fee = sell_value * FEE_RATE
-            net_sell_value = sell_value - fee
-
-            pnl = (
-                net_sell_value
-                - TRADE_AMOUNT
-            )
-
-            balance += net_sell_value
-            btc = 0.0
-
-            total_pnl += pnl
-            trades += 1
-
-            if pnl > 0:
-                wins += 1
-            else:
-                losses += 1
-
-        current_value = (
-            balance
-            + (btc * execution_price)
-        )
-
-        if current_value > peak_value:
-            peak_value = current_value
-
-        drawdown = peak_value - current_value
-
-        if drawdown > max_drawdown:
-            max_drawdown = drawdown
-
-    # Close any remaining position
-    # at the final candle close.
-    if btc > 0:
-
-        final_price = candles[-1]["close"]
-
-        sell_value = btc * final_price
-        fee = sell_value * FEE_RATE
-        net_sell_value = sell_value - fee
-
-        pnl = (
-            net_sell_value
-            - TRADE_AMOUNT
-        )
-
-        balance += net_sell_value
-        btc = 0.0
-
-        total_pnl += pnl
-        trades += 1
-
-        if pnl > 0:
-            wins += 1
-        else:
-            losses += 1
-
-    final_value = balance
-
-    completed_trades = wins + losses
-
-    if completed_trades > 0:
-        win_rate = (
-            wins / completed_trades
-        ) * 100
+    if avg_loss == 0:
+        result[period] = 100.0
     else:
-        win_rate = 0.0
+        rs = avg_gain / avg_loss
+        result[period] = 100 - (100 / (1 + rs))
 
-    return {
-        "final_value": final_value,
-        "pnl": total_pnl,
-        "trades": trades,
-        "wins": wins,
-        "losses": losses,
-        "win_rate": win_rate,
-        "drawdown": max_drawdown
-    }
+    for i in range(period + 1, len(closes)):
+        change = closes[i] - closes[i - 1]
+
+        gain = max(change, 0.0)
+        loss = max(-change, 0.0)
+
+        avg_gain = (
+            (avg_gain * (period - 1)) + gain
+        ) / period
+
+        avg_loss = (
+            (avg_loss * (period - 1)) + loss
+        ) / period
+
+        if avg_loss == 0:
+            result[i] = 100.0
+        else:
+            rs = avg_gain / avg_loss
+            result[i] = 100 - (100 / (1 + rs))
+
+    return result
 
 
-def print_result(name, result):
-    print(
-        f"{name:<14} "
-        f"P/L: ${result['pnl']:>8.2f} | "
-        f"Value: ${result['final_value']:>8.2f} | "
-        f"Win: {result['win_rate']:>6.2f}% | "
-        f"DD: ${result['drawdown']:>8.2f}"
+def atr_series(candles, period=14):
+    result = [None] * len(candles)
+
+    if len(candles) <= period:
+        return result
+
+    true_ranges = [0.0] * len(candles)
+
+    true_ranges[0] = (
+        candles[0]["high"] - candles[0]["low"]
     )
 
+    for i in range(1, len(candles)):
+        high = candles[i]["high"]
+        low = candles[i]["low"]
+        previous_close = candles[i - 1]["close"]
 
-def main():
-    print("========================================")
-    print("BTCUSDT MULTI-STRATEGY BACKTEST")
-    print("12 MONTHS: SEP 2025 - AUG 2026")
-    print("========================================")
-
-    candles = get_historical_candles()
-
-    print("----------------------------------------")
-    print(f"Total candles: {len(candles)}")
-    print("----------------------------------------")
-
-    if len(candles) < 300:
-        raise RuntimeError(
-            "Not enough historical data."
+        true_ranges[i] = max(
+            high - low,
+            abs(high - previous_close),
+            abs(low - previous_close),
         )
 
-    # First 8 months = training
-    split_index = len(candles) * 8 // 12
-
-    train_candles = candles[:split_index]
-    validation_candles = candles[split_index:]
-
-    print("")
-    print("TRAINING PERIOD: FIRST 8 MONTHS")
-    print("----------------------------------------")
-
-    train_results = []
-
-    for name, short_period, long_period in STRATEGIES:
-
-        result = run_strategy(
-            train_candles,
-            short_period,
-            long_period
-        )
-
-        train_results.append({
-            "name": name,
-            "short": short_period,
-            "long": long_period,
-            "result": result
-        })
-
-        print_result(
-            name,
-            result
-        )
-
-    # Select best strategy using
-    # training data only.
-    best = max(
-        train_results,
-        key=lambda item: item["result"]["pnl"]
-    )
-
-    print("----------------------------------------")
-    print(
-        f"BEST TRAINING STRATEGY: "
-        f"{best['name']}"
-    )
-    print("----------------------------------------")
-
-    print("")
-    print("VALIDATION PERIOD: LAST 4 MONTHS")
-    print("----------------------------------------")
-
-    validation_result = run_strategy(
-        validation_candles,
-        best["short"],
-        best["long"]
-    )
-
-    print_result(
-        best["name"],
-        validation_result
-    )
-
-    print("----------------------------------------")
-    print(
-        f"Training P/L:   "
-        f"${best['result']['pnl']:.2f}"
-    )
-
-    print(
-        f"Validation P/L: "
-        f"${validation_result['pnl']:.2f}"
-    )
-
-    print(
-        f"Validation Win: "
-        f"{validation_result['win_rate']:.2f}%"
-    )
-
-    print(
-        f"Validation DD:  "
-        f"${validation_result['drawdown']:.2f}"
-    )
-
-    print("----------------------------------------")
-    print("EXECUTION: NEXT CANDLE OPEN")
-    print("FEE: 0.40% PER SIDE")
-    print("MODE: HISTORICAL BACKTEST")
-    print("REAL MONEY: DISABLED")
-    print("========================================")
-
-
-if __name__ == "__main__":
-    main()
+    atr
