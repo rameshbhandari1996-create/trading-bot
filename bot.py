@@ -3,10 +3,6 @@ import io
 import urllib.request
 import zipfile
 
-SHORT_EMA = 9
-LONG_EMA = 21
-TREND_EMA = 200
-
 START_BALANCE = 1000.0
 TRADE_AMOUNT = 100.0
 FEE_RATE = 0.004
@@ -18,6 +14,14 @@ MONTHS = [
     (2026, 6),
     (2026, 7),
     (2026, 8),
+]
+
+STRATEGIES = [
+    ("EMA 9/21", 9, 21),
+    ("EMA 12/26", 12, 26),
+    ("EMA 20/50", 20, 50),
+    ("EMA 20/100", 20, 100),
+    ("EMA 50/200", 50, 200),
 ]
 
 
@@ -37,7 +41,7 @@ def get_historical_candles():
 
         request = urllib.request.Request(
             url,
-            headers={"User-Agent": "BTC-EMA-Trend-Backtest/1.0"}
+            headers={"User-Agent": "BTC-Multi-Strategy-Backtest/1.0"}
         )
 
         with urllib.request.urlopen(request, timeout=60) as response:
@@ -69,111 +73,121 @@ def get_historical_candles():
     return candles
 
 
-def calculate_ema(prices, period):
+def calculate_ema_series(prices, period):
     multiplier = 2 / (period + 1)
-    ema = prices[0]
 
-    for price in prices[1:]:
-        ema = ((price - ema) * multiplier) + ema
+    ema_values = [None] * len(prices)
 
-    return ema
+    if len(prices) < period:
+        return ema_values
+
+    ema = sum(prices[:period]) / period
+    ema_values[period - 1] = ema
+
+    for i in range(period, len(prices)):
+        ema = (
+            (prices[i] - ema) * multiplier
+        ) + ema
+
+        ema_values[i] = ema
+
+    return ema_values
 
 
-def backtest(candles):
+def run_strategy(candles, short_period, long_period):
     closes = [candle["close"] for candle in candles]
+
+    ema_short = calculate_ema_series(
+        closes,
+        short_period
+    )
+
+    ema_long = calculate_ema_series(
+        closes,
+        long_period
+    )
 
     balance = START_BALANCE
     btc = 0.0
 
     trades = 0
-    winning_trades = 0
-    losing_trades = 0
+    wins = 0
+    losses = 0
     total_pnl = 0.0
 
-    max_balance = START_BALANCE
+    peak_value = START_BALANCE
     max_drawdown = 0.0
 
-    previous_ema9 = None
-    previous_ema21 = None
+    for i in range(long_period, len(candles) - 1):
 
-    for i in range(TREND_EMA, len(candles) - 1):
-        history = closes[:i + 1]
+        if (
+            ema_short[i - 1] is None
+            or ema_long[i - 1] is None
+            or ema_short[i] is None
+            or ema_long[i] is None
+        ):
+            continue
 
-        ema9 = calculate_ema(history, SHORT_EMA)
-        ema21 = calculate_ema(history, LONG_EMA)
-        ema200 = calculate_ema(history, TREND_EMA)
+        crossed_up = (
+            ema_short[i - 1] <= ema_long[i - 1]
+            and ema_short[i] > ema_long[i]
+        )
 
-        current_close = closes[i]
+        crossed_down = (
+            ema_short[i - 1] >= ema_long[i - 1]
+            and ema_short[i] < ema_long[i]
+        )
 
         execution_price = candles[i + 1]["open"]
 
-        if previous_ema9 is not None and previous_ema21 is not None:
+        # BUY at next candle OPEN
+        if (
+            crossed_up
+            and btc == 0
+            and balance >= TRADE_AMOUNT
+        ):
+            fee = TRADE_AMOUNT * FEE_RATE
+            amount_after_fee = TRADE_AMOUNT - fee
 
-            crossed_up = (
-                previous_ema9 <= previous_ema21
-                and ema9 > ema21
-            )
+            btc = amount_after_fee / execution_price
+            balance -= TRADE_AMOUNT
+            trades += 1
 
-            crossed_down = (
-                previous_ema9 >= previous_ema21
-                and ema9 < ema21
-            )
+        # SELL at next candle OPEN
+        elif crossed_down and btc > 0:
 
-            # BUY only when the larger trend is bullish
-            if (
-                crossed_up
-                and current_close > ema200
-                and btc == 0
-                and balance >= TRADE_AMOUNT
-            ):
-                fee = TRADE_AMOUNT * FEE_RATE
-                amount_after_fee = TRADE_AMOUNT - fee
+            sell_value = btc * execution_price
+            fee = sell_value * FEE_RATE
+            net_sell_value = sell_value - fee
 
-                btc = amount_after_fee / execution_price
-                balance -= TRADE_AMOUNT
+            pnl = net_sell_value - TRADE_AMOUNT
 
-                trades += 1
+            balance += net_sell_value
+            btc = 0.0
 
-            # SELL on bearish crossover OR when price falls below EMA 200
-            elif (
-                btc > 0
-                and (
-                    crossed_down
-                    or current_close < ema200
-                )
-            ):
-                sell_value = btc * execution_price
-                fee = sell_value * FEE_RATE
-                net_sell_value = sell_value - fee
+            total_pnl += pnl
+            trades += 1
 
-                pnl = net_sell_value - TRADE_AMOUNT
+            if pnl > 0:
+                wins += 1
+            else:
+                losses += 1
 
-                balance += net_sell_value
-                btc = 0.0
+        current_value = (
+            balance + (btc * execution_price)
+        )
 
-                total_pnl += pnl
-                trades += 1
+        if current_value > peak_value:
+            peak_value = current_value
 
-                if pnl > 0:
-                    winning_trades += 1
-                else:
-                    losing_trades += 1
-
-        current_value = balance + (btc * execution_price)
-
-        if current_value > max_balance:
-            max_balance = current_value
-
-        drawdown = max_balance - current_value
+        drawdown = peak_value - current_value
 
         if drawdown > max_drawdown:
             max_drawdown = drawdown
 
-        previous_ema9 = ema9
-        previous_ema21 = ema21
-
-    # Close any remaining position at the final candle close
+    # Close open position at final candle close
     if btc > 0:
+
         final_price = candles[-1]["close"]
 
         sell_value = btc * final_price
@@ -183,66 +197,139 @@ def backtest(candles):
         pnl = net_sell_value - TRADE_AMOUNT
 
         balance += net_sell_value
-        btc = 0.0
 
         total_pnl += pnl
         trades += 1
 
         if pnl > 0:
-            winning_trades += 1
+            wins += 1
         else:
-            losing_trades += 1
+            losses += 1
+
+        btc = 0.0
 
     final_value = balance
 
-    completed_trades = winning_trades + losing_trades
+    completed_trades = wins + losses
 
     if completed_trades > 0:
         win_rate = (
-            winning_trades / completed_trades
+            wins / completed_trades
         ) * 100
     else:
         win_rate = 0.0
 
     return {
-        "candles": len(candles),
         "final_value": final_value,
-        "total_pnl": total_pnl,
+        "pnl": total_pnl,
         "trades": trades,
-        "winning_trades": winning_trades,
-        "losing_trades": losing_trades,
+        "wins": wins,
+        "losses": losses,
         "win_rate": win_rate,
-        "max_drawdown": max_drawdown
+        "drawdown": max_drawdown,
     }
+
+
+def print_result(name, result):
+    print(
+        f"{name:<14} "
+        f"P/L: ${result['pnl']:>8.2f} | "
+        f"Value: ${result['final_value']:>8.2f} | "
+        f"Win: {result['win_rate']:>6.2f}% | "
+        f"DD: ${result['drawdown']:>8.2f}"
+    )
 
 
 def main():
     print("========================================")
-    print("BTCUSDT EMA 9/21 + EMA 200 FILTER")
-    print("REALISTIC 6 MONTH BACKTEST")
+    print("BTCUSDT MULTI-STRATEGY BACKTEST")
     print("========================================")
 
     candles = get_historical_candles()
 
-    if len(candles) < TREND_EMA + 10:
-        raise RuntimeError("Not enough historical data.")
+    print("----------------------------------------")
+    print(f"Total candles: {len(candles)}")
+    print("----------------------------------------")
 
-    result = backtest(candles)
+    # 4 months training data
+    split_index = len(candles) * 4 // 6
+
+    train_candles = candles[:split_index]
+    validation_candles = candles[split_index:]
+
+    print("\nTRAINING PERIOD: FIRST 4 MONTHS")
+    print("----------------------------------------")
+
+    train_results = []
+
+    for name, short_period, long_period in STRATEGIES:
+
+        result = run_strategy(
+            train_candles,
+            short_period,
+            long_period
+        )
+
+        train_results.append({
+            "name": name,
+            "short": short_period,
+            "long": long_period,
+            "result": result
+        })
+
+        print_result(name, result)
+
+    # Best strategy based on training P/L
+    best = max(
+        train_results,
+        key=lambda x: x["result"]["pnl"]
+    )
 
     print("----------------------------------------")
-    print(f"Candles tested:   {result['candles']}")
-    print(f"Starting Balance: ${START_BALANCE:,.2f}")
-    print(f"Final Value:      ${result['final_value']:,.2f}")
-    print(f"Total P/L:        ${result['total_pnl']:,.2f}")
-    print(f"Trades:           {result['trades']}")
-    print(f"Winning Trades:   {result['winning_trades']}")
-    print(f"Losing Trades:    {result['losing_trades']}")
-    print(f"Win Rate:         {result['win_rate']:.2f}%")
-    print(f"Max Drawdown:     ${result['max_drawdown']:,.2f}")
+    print(
+        f"BEST TRAINING STRATEGY: "
+        f"{best['name']}"
+    )
     print("----------------------------------------")
-    print("ENTRY: EMA 9/21 CROSS + PRICE > EMA 200")
-    print("EXIT: EMA 9/21 CROSS OR PRICE < EMA 200")
+
+    print("\nVALIDATION PERIOD: LAST 2 MONTHS")
+    print("----------------------------------------")
+
+    validation_result = run_strategy(
+        validation_candles,
+        best["short"],
+        best["long"]
+    )
+
+    print_result(
+        best["name"],
+        validation_result
+    )
+
+    print("----------------------------------------")
+    print(
+        f"Training P/L:   "
+        f"${best['result']['pnl']:.2f}"
+    )
+
+    print(
+        f"Validation P/L: "
+        f"${validation_result['pnl']:.2f}"
+    )
+
+    print(
+        f"Validation Win: "
+        f"{validation_result['win_rate']:.2f}%"
+    )
+
+    print(
+        f"Validation DD:  "
+        f"${validation_result['drawdown']:.2f}"
+    )
+
+    print("----------------------------------------")
     print("EXECUTION: NEXT CANDLE OPEN")
+    print("FEE: 0.40% PER SIDE")
     print("MODE: HISTORICAL BACKTEST")
     print("REAL MONEY: DISABLED")
     print("========================================")
