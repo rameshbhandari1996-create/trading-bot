@@ -67,8 +67,6 @@ def backtest(prices):
     previous_ema9 = None
     previous_ema21 = None
 
-    trade_log = []
-
     for i in range(LONG_EMA, len(prices)):
         history = prices[:i + 1]
 
@@ -94,11 +92,6 @@ def backtest(prices):
 
                 trades += 1
 
-                trade_log.append({
-                    "type": "BUY",
-                    "price": price
-                })
-
             # SELL when EMA 9 crosses below EMA 21
             elif (
                 previous_ema9 >= previous_ema21
@@ -121,12 +114,6 @@ def backtest(prices):
                     winning_trades += 1
                 else:
                     losing_trades += 1
-
-                trade_log.append({
-                    "type": "SELL",
-                    "price": price,
-                    "pnl": pnl
-                })
 
         current_value = balance + (btc * price)
 
@@ -155,7 +142,6 @@ def backtest(prices):
         btc = 0.0
 
         total_pnl += pnl
-
         trades += 1
 
         if pnl > 0:
@@ -192,8 +178,26 @@ def main():
 
     prices = get_candles()
 
+    if len(prices) < LONG_EMA + 10:
+        raise RuntimeError("Not enough candle data for backtest.")
+
     result = backtest(prices)
 
     print(f"Candles tested: {result['candles']}")
     print("--------------------------------")
-    print(f"Starting
+    print(f"Starting Balance: ${START_BALANCE:,.2f}")
+    print(f"Final Value:      ${result['final_value']:,.2f}")
+    print(f"Total P/L:        ${result['total_pnl']:,.2f}")
+    print(f"Trades:           {result['trades']}")
+    print(f"Winning Trades:   {result['winning_trades']}")
+    print(f"Losing Trades:    {result['losing_trades']}")
+    print(f"Win Rate:         {result['win_rate']:.2f}%")
+    print(f"Max Drawdown:     ${result['max_drawdown']:,.2f}")
+    print("--------------------------------")
+    print("MODE: BACKTEST")
+    print("REAL MONEY: DISABLED")
+    print("================================")
+
+
+if __name__ == "__main__":
+    main()
