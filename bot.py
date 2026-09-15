@@ -5,6 +5,7 @@ import zipfile
 
 SHORT_EMA = 9
 LONG_EMA = 21
+TREND_EMA = 200
 
 START_BALANCE = 1000.0
 TRADE_AMOUNT = 100.0
@@ -36,7 +37,7 @@ def get_historical_candles():
 
         request = urllib.request.Request(
             url,
-            headers={"User-Agent": "BTC-EMA-Backtest/1.0"}
+            headers={"User-Agent": "BTC-EMA-Trend-Backtest/1.0"}
         )
 
         with urllib.request.urlopen(request, timeout=60) as response:
@@ -95,14 +96,15 @@ def backtest(candles):
     previous_ema9 = None
     previous_ema21 = None
 
-    for i in range(LONG_EMA, len(candles) - 1):
+    for i in range(TREND_EMA, len(candles) - 1):
         history = closes[:i + 1]
 
         ema9 = calculate_ema(history, SHORT_EMA)
         ema21 = calculate_ema(history, LONG_EMA)
+        ema200 = calculate_ema(history, TREND_EMA)
 
-        # Signal is known only after candle i closes.
-        # Trade executes at the NEXT candle's open.
+        current_close = closes[i]
+
         execution_price = candles[i + 1]["open"]
 
         if previous_ema9 is not None and previous_ema21 is not None:
@@ -117,9 +119,10 @@ def backtest(candles):
                 and ema9 < ema21
             )
 
-            # BUY at next candle OPEN
+            # BUY only when the larger trend is bullish
             if (
                 crossed_up
+                and current_close > ema200
                 and btc == 0
                 and balance >= TRADE_AMOUNT
             ):
@@ -131,8 +134,14 @@ def backtest(candles):
 
                 trades += 1
 
-            # SELL at next candle OPEN
-            elif crossed_down and btc > 0:
+            # SELL on bearish crossover OR when price falls below EMA 200
+            elif (
+                btc > 0
+                and (
+                    crossed_down
+                    or current_close < ema200
+                )
+            ):
                 sell_value = btc * execution_price
                 fee = sell_value * FEE_RATE
                 net_sell_value = sell_value - fee
@@ -163,7 +172,7 @@ def backtest(candles):
         previous_ema9 = ema9
         previous_ema21 = ema21
 
-    # Close any remaining position at the final candle close.
+    # Close any remaining position at the final candle close
     if btc > 0:
         final_price = candles[-1]["close"]
 
@@ -209,13 +218,13 @@ def backtest(candles):
 
 def main():
     print("========================================")
-    print("BTCUSDT EMA 9/21")
+    print("BTCUSDT EMA 9/21 + EMA 200 FILTER")
     print("REALISTIC 6 MONTH BACKTEST")
     print("========================================")
 
     candles = get_historical_candles()
 
-    if len(candles) < LONG_EMA + 10:
+    if len(candles) < TREND_EMA + 10:
         raise RuntimeError("Not enough historical data.")
 
     result = backtest(candles)
@@ -231,6 +240,8 @@ def main():
     print(f"Win Rate:         {result['win_rate']:.2f}%")
     print(f"Max Drawdown:     ${result['max_drawdown']:,.2f}")
     print("----------------------------------------")
+    print("ENTRY: EMA 9/21 CROSS + PRICE > EMA 200")
+    print("EXIT: EMA 9/21 CROSS OR PRICE < EMA 200")
     print("EXECUTION: NEXT CANDLE OPEN")
     print("MODE: HISTORICAL BACKTEST")
     print("REAL MONEY: DISABLED")
