@@ -8,6 +8,12 @@ TRADE_AMOUNT = 100.0
 FEE_RATE = 0.004
 
 MONTHS = [
+    (2025, 9),
+    (2025, 10),
+    (2025, 11),
+    (2025, 12),
+    (2026, 1),
+    (2026, 2),
     (2026, 3),
     (2026, 4),
     (2026, 5),
@@ -41,7 +47,9 @@ def get_historical_candles():
 
         request = urllib.request.Request(
             url,
-            headers={"User-Agent": "BTC-Multi-Strategy-Backtest/1.0"}
+            headers={
+                "User-Agent": "BTC-Multi-Strategy-Backtest/1.0"
+            }
         )
 
         with urllib.request.urlopen(request, timeout=60) as response:
@@ -52,7 +60,10 @@ def get_historical_candles():
 
             with z.open(csv_name) as file:
                 reader = csv.reader(
-                    io.TextIOWrapper(file, encoding="utf-8")
+                    io.TextIOWrapper(
+                        file,
+                        encoding="utf-8"
+                    )
                 )
 
                 for row in reader:
@@ -95,7 +106,10 @@ def calculate_ema_series(prices, period):
 
 
 def run_strategy(candles, short_period, long_period):
-    closes = [candle["close"] for candle in candles]
+    closes = [
+        candle["close"]
+        for candle in candles
+    ]
 
     ema_short = calculate_ema_series(
         closes,
@@ -149,7 +163,11 @@ def run_strategy(candles, short_period, long_period):
             fee = TRADE_AMOUNT * FEE_RATE
             amount_after_fee = TRADE_AMOUNT - fee
 
-            btc = amount_after_fee / execution_price
+            btc = (
+                amount_after_fee
+                / execution_price
+            )
+
             balance -= TRADE_AMOUNT
             trades += 1
 
@@ -160,7 +178,10 @@ def run_strategy(candles, short_period, long_period):
             fee = sell_value * FEE_RATE
             net_sell_value = sell_value - fee
 
-            pnl = net_sell_value - TRADE_AMOUNT
+            pnl = (
+                net_sell_value
+                - TRADE_AMOUNT
+            )
 
             balance += net_sell_value
             btc = 0.0
@@ -174,7 +195,8 @@ def run_strategy(candles, short_period, long_period):
                 losses += 1
 
         current_value = (
-            balance + (btc * execution_price)
+            balance
+            + (btc * execution_price)
         )
 
         if current_value > peak_value:
@@ -185,7 +207,8 @@ def run_strategy(candles, short_period, long_period):
         if drawdown > max_drawdown:
             max_drawdown = drawdown
 
-    # Close open position at final candle close
+    # Close any remaining position
+    # at the final candle close.
     if btc > 0:
 
         final_price = candles[-1]["close"]
@@ -194,9 +217,13 @@ def run_strategy(candles, short_period, long_period):
         fee = sell_value * FEE_RATE
         net_sell_value = sell_value - fee
 
-        pnl = net_sell_value - TRADE_AMOUNT
+        pnl = (
+            net_sell_value
+            - TRADE_AMOUNT
+        )
 
         balance += net_sell_value
+        btc = 0.0
 
         total_pnl += pnl
         trades += 1
@@ -205,8 +232,6 @@ def run_strategy(candles, short_period, long_period):
             wins += 1
         else:
             losses += 1
-
-        btc = 0.0
 
     final_value = balance
 
@@ -226,7 +251,7 @@ def run_strategy(candles, short_period, long_period):
         "wins": wins,
         "losses": losses,
         "win_rate": win_rate,
-        "drawdown": max_drawdown,
+        "drawdown": max_drawdown
     }
 
 
@@ -243,6 +268,7 @@ def print_result(name, result):
 def main():
     print("========================================")
     print("BTCUSDT MULTI-STRATEGY BACKTEST")
+    print("12 MONTHS: SEP 2025 - AUG 2026")
     print("========================================")
 
     candles = get_historical_candles()
@@ -251,13 +277,19 @@ def main():
     print(f"Total candles: {len(candles)}")
     print("----------------------------------------")
 
-    # 4 months training data
-    split_index = len(candles) * 4 // 6
+    if len(candles) < 300:
+        raise RuntimeError(
+            "Not enough historical data."
+        )
+
+    # First 8 months = training
+    split_index = len(candles) * 8 // 12
 
     train_candles = candles[:split_index]
     validation_candles = candles[split_index:]
 
-    print("\nTRAINING PERIOD: FIRST 4 MONTHS")
+    print("")
+    print("TRAINING PERIOD: FIRST 8 MONTHS")
     print("----------------------------------------")
 
     train_results = []
@@ -277,12 +309,16 @@ def main():
             "result": result
         })
 
-        print_result(name, result)
+        print_result(
+            name,
+            result
+        )
 
-    # Best strategy based on training P/L
+    # Select best strategy using
+    # training data only.
     best = max(
         train_results,
-        key=lambda x: x["result"]["pnl"]
+        key=lambda item: item["result"]["pnl"]
     )
 
     print("----------------------------------------")
@@ -292,7 +328,8 @@ def main():
     )
     print("----------------------------------------")
 
-    print("\nVALIDATION PERIOD: LAST 2 MONTHS")
+    print("")
+    print("VALIDATION PERIOD: LAST 4 MONTHS")
     print("----------------------------------------")
 
     validation_result = run_strategy(
