@@ -1,49 +1,73 @@
-import json
+import csv
+import io
 import urllib.request
-
-SYMBOL = "XBTUSDT"
-INTERVAL = 15
+import zipfile
 
 SHORT_EMA = 9
 LONG_EMA = 21
 
 START_BALANCE = 1000.0
 TRADE_AMOUNT = 100.0
-
 FEE_RATE = 0.004
 
+MONTHS = [
+    (2026, 3),
+    (2026, 4),
+    (2026, 5),
+    (2026, 6),
+    (2026, 7),
+    (2026, 8),
+]
 
-def get_candles():
-    url = (
-        f"https://api.kraken.com/0/public/OHLC"
-        f"?pair={SYMBOL}&interval={INTERVAL}"
-    )
 
-    request = urllib.request.Request(
-        url,
-        headers={"User-Agent": "BTC-Backtest-Bot/1.0"}
-    )
+def get_historical_prices():
+    prices = []
 
-    with urllib.request.urlopen(request, timeout=15) as response:
-        data = json.loads(response.read().decode())
+    for year, month in MONTHS:
+        month_text = f"{month:02d}"
 
-    if data.get("error"):
-        raise RuntimeError(data["error"])
+        url = (
+            "https://data.binance.vision/data/spot/monthly/"
+            f"klines/BTCUSDT/15m/"
+            f"BTCUSDT-15m-{year}-{month_text}.zip"
+        )
 
-    result = data["result"]
-    pair_key = [key for key in result if key != "last"][0]
+        print(f"Downloading {year}-{month_text}...")
 
-    candles = result[pair_key]
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "BTC-EMA-Backtest/1.0"}
+        )
 
-    # Remove the currently forming candle
-    candles = candles[:-1]
+        with urllib.request.urlopen(request, timeout=60) as response:
+            zip_data = response.read()
 
-    return [float(candle[4]) for candle in candles]
+        with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
+            csv_name = z.namelist()[0]
+
+            with z.open(csv_name) as file:
+                reader = csv.reader(
+                    io.TextIOWrapper(file, encoding="utf-8")
+                )
+
+                for row in reader:
+                    if not row:
+                        continue
+
+                    # Binance kline format:
+                    # 0=open time, 1=open, 2=high, 3=low, 4=close
+                    try:
+                        close_price = float(row[4])
+                    except (ValueError, IndexError):
+                        continue
+
+                    prices.append(close_price)
+
+    return prices
 
 
 def calculate_ema(prices, period):
     multiplier = 2 / (period + 1)
-
     ema = prices[0]
 
     for price in prices[1:]:
@@ -59,8 +83,8 @@ def backtest(prices):
     trades = 0
     winning_trades = 0
     losing_trades = 0
-
     total_pnl = 0.0
+
     max_balance = START_BALANCE
     max_drawdown = 0.0
 
@@ -77,7 +101,7 @@ def backtest(prices):
 
         if previous_ema9 is not None and previous_ema21 is not None:
 
-            # BUY when EMA 9 crosses above EMA 21
+            # BUY: EMA 9 crosses above EMA 21
             if (
                 previous_ema9 <= previous_ema21
                 and ema9 > ema21
@@ -92,7 +116,7 @@ def backtest(prices):
 
                 trades += 1
 
-            # SELL when EMA 9 crosses below EMA 21
+            # SELL: EMA 9 crosses below EMA 21
             elif (
                 previous_ema9 >= previous_ema21
                 and ema9 < ema21
@@ -128,7 +152,7 @@ def backtest(prices):
         previous_ema9 = ema9
         previous_ema21 = ema21
 
-    # Close any open position at the final price
+    # Close open position at final price
     if btc > 0:
         final_price = prices[-1]
 
@@ -151,13 +175,14 @@ def backtest(prices):
 
     final_value = balance
 
-    win_rate = 0.0
+    completed_trades = winning_trades + losing_trades
 
-    if winning_trades + losing_trades > 0:
+    if completed_trades > 0:
         win_rate = (
-            winning_trades
-            / (winning_trades + losing_trades)
+            winning_trades / completed_trades
         ) * 100
+    else:
+        win_rate = 0.0
 
     return {
         "final_value": final_value,
@@ -167,24 +192,26 @@ def backtest(prices):
         "losing_trades": losing_trades,
         "win_rate": win_rate,
         "max_drawdown": max_drawdown,
-        "candles": len(prices)
+        "candles": len(prices),
     }
 
 
 def main():
-    print("\n================================")
-    print("BTCUSDT EMA BACKTEST")
-    print("================================")
+    print("========================================")
+    print("BTCUSDT EMA 9/21 - 6 MONTH BACKTEST")
+    print("========================================")
 
-    prices = get_candles()
+    prices = get_historical_prices()
 
     if len(prices) < LONG_EMA + 10:
-        raise RuntimeError("Not enough candle data for backtest.")
+        raise RuntimeError("Not enough historical data.")
+
+    print("----------------------------------------")
+    print(f"Total candles: {len(prices)}")
+    print("----------------------------------------")
 
     result = backtest(prices)
 
-    print(f"Candles tested: {result['candles']}")
-    print("--------------------------------")
     print(f"Starting Balance: ${START_BALANCE:,.2f}")
     print(f"Final Value:      ${result['final_value']:,.2f}")
     print(f"Total P/L:        ${result['total_pnl']:,.2f}")
@@ -193,10 +220,10 @@ def main():
     print(f"Losing Trades:    {result['losing_trades']}")
     print(f"Win Rate:         {result['win_rate']:.2f}%")
     print(f"Max Drawdown:     ${result['max_drawdown']:,.2f}")
-    print("--------------------------------")
-    print("MODE: BACKTEST")
+    print("----------------------------------------")
+    print("MODE: HISTORICAL BACKTEST")
     print("REAL MONEY: DISABLED")
-    print("================================")
+    print("========================================")
 
 
 if __name__ == "__main__":
