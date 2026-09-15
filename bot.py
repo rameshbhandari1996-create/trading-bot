@@ -1,5 +1,4 @@
 import json
-import os
 import urllib.request
 
 SYMBOL = "XBTUSDT"
@@ -11,7 +10,7 @@ LONG_EMA = 21
 START_BALANCE = 1000.0
 TRADE_AMOUNT = 100.0
 
-STATE_FILE = "paper_state.json"
+FEE_RATE = 0.004
 
 
 def get_candles():
@@ -22,7 +21,7 @@ def get_candles():
 
     request = urllib.request.Request(
         url,
-        headers={"User-Agent": "BTC-Paper-Trading-Bot/1.0"}
+        headers={"User-Agent": "BTC-Backtest-Bot/1.0"}
     )
 
     with urllib.request.urlopen(request, timeout=15) as response:
@@ -34,11 +33,17 @@ def get_candles():
     result = data["result"]
     pair_key = [key for key in result if key != "last"][0]
 
-    return [float(candle[4]) for candle in result[pair_key]][-100:]
+    candles = result[pair_key]
+
+    # Remove the currently forming candle
+    candles = candles[:-1]
+
+    return [float(candle[4]) for candle in candles]
 
 
 def calculate_ema(prices, period):
     multiplier = 2 / (period + 1)
+
     ema = prices[0]
 
     for price in prices[1:]:
@@ -47,93 +52,148 @@ def calculate_ema(prices, period):
     return ema
 
 
-def load_state():
-    if not os.path.exists(STATE_FILE):
-        return {
-            "balance": START_BALANCE,
-            "btc": 0.0,
-            "entry_price": 0.0,
-            "total_pnl": 0.0,
-            "trades": 0
-        }
+def backtest(prices):
+    balance = START_BALANCE
+    btc = 0.0
 
-    with open(STATE_FILE, "r") as f:
-        return json.load(f)
+    trades = 0
+    winning_trades = 0
+    losing_trades = 0
+
+    total_pnl = 0.0
+    max_balance = START_BALANCE
+    max_drawdown = 0.0
+
+    previous_ema9 = None
+    previous_ema21 = None
+
+    trade_log = []
+
+    for i in range(LONG_EMA, len(prices)):
+        history = prices[:i + 1]
+
+        ema9 = calculate_ema(history, SHORT_EMA)
+        ema21 = calculate_ema(history, LONG_EMA)
+
+        price = prices[i]
+
+        if previous_ema9 is not None and previous_ema21 is not None:
+
+            # BUY when EMA 9 crosses above EMA 21
+            if (
+                previous_ema9 <= previous_ema21
+                and ema9 > ema21
+                and btc == 0
+                and balance >= TRADE_AMOUNT
+            ):
+                fee = TRADE_AMOUNT * FEE_RATE
+                amount_after_fee = TRADE_AMOUNT - fee
+
+                btc = amount_after_fee / price
+                balance -= TRADE_AMOUNT
+
+                trades += 1
+
+                trade_log.append({
+                    "type": "BUY",
+                    "price": price
+                })
+
+            # SELL when EMA 9 crosses below EMA 21
+            elif (
+                previous_ema9 >= previous_ema21
+                and ema9 < ema21
+                and btc > 0
+            ):
+                sell_value = btc * price
+                fee = sell_value * FEE_RATE
+                net_sell_value = sell_value - fee
+
+                pnl = net_sell_value - TRADE_AMOUNT
+
+                balance += net_sell_value
+                btc = 0.0
+
+                total_pnl += pnl
+                trades += 1
+
+                if pnl > 0:
+                    winning_trades += 1
+                else:
+                    losing_trades += 1
+
+                trade_log.append({
+                    "type": "SELL",
+                    "price": price,
+                    "pnl": pnl
+                })
+
+        current_value = balance + (btc * price)
+
+        if current_value > max_balance:
+            max_balance = current_value
+
+        drawdown = max_balance - current_value
+
+        if drawdown > max_drawdown:
+            max_drawdown = drawdown
+
+        previous_ema9 = ema9
+        previous_ema21 = ema21
+
+    # Close any open position at the final price
+    if btc > 0:
+        final_price = prices[-1]
+
+        sell_value = btc * final_price
+        fee = sell_value * FEE_RATE
+        net_sell_value = sell_value - fee
+
+        pnl = net_sell_value - TRADE_AMOUNT
+
+        balance += net_sell_value
+        btc = 0.0
+
+        total_pnl += pnl
+
+        trades += 1
+
+        if pnl > 0:
+            winning_trades += 1
+        else:
+            losing_trades += 1
+
+    final_value = balance
+
+    win_rate = 0.0
+
+    if winning_trades + losing_trades > 0:
+        win_rate = (
+            winning_trades
+            / (winning_trades + losing_trades)
+        ) * 100
+
+    return {
+        "final_value": final_value,
+        "total_pnl": total_pnl,
+        "trades": trades,
+        "winning_trades": winning_trades,
+        "losing_trades": losing_trades,
+        "win_rate": win_rate,
+        "max_drawdown": max_drawdown,
+        "candles": len(prices)
+    }
 
 
-def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
+def main():
+    print("\n================================")
+    print("BTCUSDT EMA BACKTEST")
+    print("================================")
 
-
-def paper_trade():
     prices = get_candles()
 
-    price = prices[-1]
+    result = backtest(prices)
 
-    ema9 = calculate_ema(prices, SHORT_EMA)
-    ema21 = calculate_ema(prices, LONG_EMA)
-
-    if ema9 > ema21:
-        signal = "BUY"
-    elif ema9 < ema21:
-        signal = "SELL"
-    else:
-        signal = "HOLD"
-
-    state = load_state()
-
-    # BUY: open a paper position
-    if signal == "BUY" and state["btc"] == 0:
-        state["btc"] = TRADE_AMOUNT / price
-        state["balance"] -= TRADE_AMOUNT
-        state["entry_price"] = price
-        state["trades"] += 1
-        action = "PAPER BUY"
-
-    # SELL: close paper position
-    elif signal == "SELL" and state["btc"] > 0:
-        sell_value = state["btc"] * price
-        pnl = sell_value - TRADE_AMOUNT
-
-        state["balance"] += sell_value
-        state["total_pnl"] += pnl
-        state["btc"] = 0.0
-        state["entry_price"] = 0.0
-        state["trades"] += 1
-        action = f"PAPER SELL | P/L: ${pnl:.2f}"
-
-    else:
-        action = "NO TRADE"
-
-    save_state(state)
-
-    unrealized = 0.0
-
-    if state["btc"] > 0:
-        unrealized = (state["btc"] * price) - TRADE_AMOUNT
-
-    total_value = state["balance"] + (state["btc"] * price)
-
-    print("\n==============================")
-    print("BTCUSDT PAPER TRADING BOT")
-    print("==============================")
-    print(f"BTC Price: ${price:,.2f}")
-    print(f"EMA 9:     ${ema9:,.2f}")
-    print(f"EMA 21:    ${ema21:,.2f}")
-    print(f"Signal:    {signal}")
-    print(f"Action:    {action}")
-    print("------------------------------")
-    print(f"Balance:   ${state['balance']:,.2f}")
-    print(f"BTC Held:  {state['btc']:.8f}")
-    print(f"Total P/L: ${state['total_pnl']:,.2f}")
-    print(f"Open P/L:  ${unrealized:,.2f}")
-    print(f"Value:     ${total_value:,.2f}")
-    print(f"Trades:    {state['trades']}")
-    print("------------------------------")
-    print("MODE: PAPER TRADING")
-    print("REAL MONEY: DISABLED")
-    print("==============================")
-
-
-paper_trade()
+    print(f"Candles tested: {result['candles']}")
+    print("--------------------------------")
+    print(f"Starting
